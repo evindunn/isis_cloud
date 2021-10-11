@@ -37,7 +37,7 @@ class ISISClient:
     def command(self, command: str):
         return ISISRequest(self._server_addr, command)
 
-    def cp(self, remote_path, local_path):
+    def download(self, remote_path, local_path):
         return ISISClient.fetch(self._file_url(remote_path), local_path)
 
     def rm(self, remote_path):

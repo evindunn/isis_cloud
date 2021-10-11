@@ -26,7 +26,7 @@ def run_isis():
 
         # Only allow executables in the conda bin
         command = path_join(
-            getenv("CONDA_PREFIX"),
+            getenv("ISISROOT"),
             "bin",
             req["command"].strip("/")
         )

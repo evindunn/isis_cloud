@@ -74,7 +74,7 @@ try:
     isis2std.add_arg("format", "tiff")
     isis2std.send()
 
-    client.cp(output_file, output_file)
+    client.download(output_file, output_file)
 
 except Exception as e:
     print(e, file=stderr)
