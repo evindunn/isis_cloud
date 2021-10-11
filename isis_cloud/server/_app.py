@@ -10,6 +10,7 @@ from ._config import ISISServerConfig
 
 class ISISServer(connexion.FlaskApp):
     _CLEANUP_LOGGER = getLogger("FileCleanup")
+    # Remove stale files once per day
     _DELETE_FILES_AFTER = 3600 * 24
 
     def __init__(self):
@@ -39,6 +40,6 @@ class ISISServer(connexion.FlaskApp):
                 remove(file)
 
         if not removed_files:
-            ISISServer._CLEANUP_LOGGER.info("No stale job file to remove")
+            ISISServer._CLEANUP_LOGGER.info("No stale job files to remove")
 
         sleep(ISISServer._DELETE_FILES_AFTER)
