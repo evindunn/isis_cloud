@@ -2,14 +2,14 @@
 A project to make ISIS processing cloud-ready
 
 - [Server](./isis_cloud/server/_app.py): A [Connexion](https://connexion.readthedocs.io)
-Flask server with OpenAPI documentation. The documentation API is hosted at /api/v1/docs when 
+Flask server with OpenAPI documentation. The documentation is hosted at /api/v1/docs when 
 [wsgi.py](./wsgi.py) is running.
 - [Client](./isis_cloud/client/_client.py) that wraps request generation
 
 ## Creating the app environment
 ```shell
-conda env create --prefix .conda -f environment.yml
-conda activate ./.conda
+conda env create -f environment.yml
+conda activate isis
 ```
 
 ## Running the server
@@ -39,7 +39,7 @@ curl -H 'Content-Type: application/json' \
   http://127.0.0.1:8080/api/v1/isis
   
 # Download the result
-curl -o mro.cub http://127.0.0.1:5000/files/mro.cub
+curl -o mro.cub http://127.0.0.1:8080/files/mro.cub
 ```
 
 ### isis_cloud.client.ISISClient
