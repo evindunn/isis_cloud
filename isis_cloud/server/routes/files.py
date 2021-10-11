@@ -1,6 +1,6 @@
 from flask import request, send_from_directory
 from os.path import exists as path_exists, join as path_join
-from os import makedirs
+from os import makedirs, remove
 
 from .._config import ISISServerConfig
 
@@ -20,3 +20,11 @@ def retrieve_file(file_name):
         return {"message": "File not found"}, 404
 
     return send_from_directory(ISISServerConfig.work_dir(), file_name)
+
+
+def delete_file(file_name):
+    file_path = path_join(ISISServerConfig.work_dir(), file_name)
+    if not path_exists(file_path):
+        return {"message": "File not found"}, 404
+
+    remove(file_path)

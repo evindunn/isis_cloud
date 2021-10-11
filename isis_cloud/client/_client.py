@@ -6,6 +6,16 @@ from urllib.parse import quote_plus as url_quote
 from logging import getLogger
 
 
+def catch_err(req):
+    if not req.ok:
+        req_json = req.json()
+        err = "Server responded with {}: {}".format(
+            req.status_code,
+            req_json["message"]
+        )
+        raise RuntimeError(err)
+
+
 class ISISClient:
     logger = getLogger("ISISClient")
 
@@ -25,6 +35,13 @@ class ISISClient:
     def cp(self, remote_path, local_path):
         return ISISClient.fetch(self._file_url(remote_path), local_path)
 
+    def rm(self, remote_path):
+        remote_url = self._file_url(remote_path)
+        ISISClient.logger.debug("Deleting {}...".format(remote_url))
+        r = requests.delete(remote_url)
+        catch_err(r)
+        ISISClient.logger.debug("{} deleted successfully".format(remote_url))
+
     @staticmethod
     def fetch(remote_url, download_path):
         ISISClient.logger.debug("Downloading {}...".format(remote_url))
@@ -32,6 +49,8 @@ class ISISClient:
 
         download_file = open(download_path, 'wb')
         response = requests.get(remote_url, stream=True)
+
+        catch_err(response)
 
         with response, download_file:
             for chunk in response.iter_content(chunk_size=ISISClient._DL_CHUNK_SIZE):
@@ -61,16 +80,6 @@ class ISISRequest:
         self._files[arg_name] = file_path
         return self
 
-    @staticmethod
-    def _catch_err(req):
-        if not req.ok:
-            req_json = req.json()
-            err = "Server responded with {}: {}".format(
-                req.status_code,
-                req_json["message"]
-            )
-            raise RuntimeError(err)
-
     def send(self):
         self._logger.debug("Starting...")
         start_time = time()
@@ -88,7 +97,7 @@ class ISISRequest:
                 "/".join([self._server_url, "files"]),
                 files=file_uploads
             )
-            ISISRequest._catch_err(r)
+            catch_err(r)
 
         r = requests.post(
             "/".join([self._server_url, "isis"]),
@@ -97,6 +106,6 @@ class ISISRequest:
                 "args": command_args
             }
         )
-        ISISRequest._catch_err(r)
+        catch_err(r)
 
         self._logger.debug("Took {:.1f}s".format(time() - start_time))

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
 from sys import path as sys_path
-from os.path import dirname, basename
+from os.path import dirname, basename, realpath
 from sys import stderr
 from logging import basicConfig as logConfig, getLogger, DEBUG, ERROR
 from urllib.parse import urlparse
 
-current_dir = dirname(__file__)
-sys_path.insert(0, current_dir)
+pkg_dir = dirname(dirname(realpath(__file__)))
+sys_path.insert(0, pkg_dir)
 
 from isis_cloud.client import ISISClient
 
@@ -24,6 +24,7 @@ input_url = "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/
 
 input_url_parsed = urlparse(input_url)
 input_file = basename(input_url_parsed.path)
+output_file = input_file.replace(".IMG", ".tif")
 
 try:
     ISISClient.fetch(
@@ -67,14 +68,13 @@ try:
     cam2map.add_arg("to", "cam2map.cub")
     cam2map.send()
 
-    outfile = input_file.replace(".IMG", ".png")
-
     isis2std = client.command("isis2std")
     isis2std.add_arg("from", "cam2map.cub")
-    isis2std.add_arg("to", outfile)
+    isis2std.add_arg("to", output_file)
+    isis2std.add_arg("format", "tiff")
     isis2std.send()
 
-    client.cp(outfile, outfile)
+    client.cp(output_file, output_file)
 
 except Exception as e:
     print(e, file=stderr)

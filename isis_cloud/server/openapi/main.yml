@@ -74,6 +74,33 @@ paths:
                 format: binary
         "404":
           description: The specified file does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+    delete:
+      operationId: isis_cloud.server.routes.files.delete_file
+      tags:
+        - File Management
+      summary: Delete a file on the ISIS server
+      parameters:
+        - name: file_name
+          in: path
+          description: The file to delete
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The file was deleted successfully
+        "404":
+          description: The specified file does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
 components:
   schemas:
     ISISCommand:
@@ -90,3 +117,11 @@ components:
           type: object
           additionalProperties: true
           example: '{"from": "my-mro.img", "to": "my-mro.cub"}'
+    ErrorMessage:
+      required: [message]
+      type: object
+      properties:
+        message:
+          type: string
+          description: The error message
+          example: File not found
