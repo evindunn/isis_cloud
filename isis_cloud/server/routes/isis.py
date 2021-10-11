@@ -1,44 +1,54 @@
-from os import chdir, getcwd
-from os.path import exists as path_exists
+from os import chdir, getcwd, getenv
+from os.path import exists as path_exists, join as path_join
 from os import remove
+from subprocess import run as sp_run, PIPE, DEVNULL
+from errno import ENOENT as FILE_NOT_FOUND
 
-from flask import request
-from kalasiris import kalasiris
+
+from flask import request, jsonify
 
 from .._config import ISISServerConfig
+
+
+def _serialize_command_args(arg_dict):
+    args = list()
+    for k, v in arg_dict.items():
+        args.append("{}={}".format(k, str(v)))
+    return args
 
 
 def run_isis():
     orig_dir = getcwd()
     chdir(ISISServerConfig.work_dir())
 
-
     try:
         req = request.get_json()
 
-        command = req.pop("command")
-        command_args = req["args"]
+        # Only allow executables in the conda bin
+        command = path_join(
+            getenv("CONDA_PREFIX"),
+            "bin",
+            req["command"].strip("/")
+        )
 
-        isis_func = getattr(kalasiris, command)
+        if not path_exists(command):
+            return jsonify({"message": "Command not found"}), 404
+
+        command_args = _serialize_command_args(req["args"])
 
         for file in ["print.prt", "errors.prt"]:
             if path_exists(file):
                 remove(file)
 
-        response = ({"message": "Command executed successfully"}, 200)
-        try:
-            isis_func(**command_args)
+        status = 200
+        response = {"message": "Command executed successfully"}
+        proc = sp_run([command, *command_args], stdout=DEVNULL, stderr=PIPE)
 
-        except Exception as e:
-            try:
-                kalasiris.errors(from_="print.prt", to="errors.prt")
-                with open("errors.prt") as f:
-                    error = f.read()
-            except:
-                error = str(e)
-                response = ({"message": error}, 500)
+        if not proc.returncode == 0:
+            status = 500
+            response["message"] = proc.stderr.decode("utf-8")
 
-        return response
+        return jsonify(response), status
 
     finally:
         chdir(orig_dir)

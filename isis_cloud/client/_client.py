@@ -6,13 +6,18 @@ from urllib.parse import quote_plus as url_quote
 from logging import getLogger
 
 
-def catch_err(req):
+def _catch_err(req):
     if not req.ok:
-        req_json = req.json()
-        err = "Server responded with {}: {}".format(
-            req.status_code,
-            req_json["message"]
-        )
+        err = "Server responded with {}".format(req.status_code)
+
+        if req.headers.get("content-type").startswith("application/json"):
+            req_json = req.json()
+            if "message" in req_json.keys():
+                err = "Server responded with {}: {}".format(
+                    req.status_code,
+                    req_json["message"]
+                )
+
         raise RuntimeError(err)
 
 
@@ -39,7 +44,7 @@ class ISISClient:
         remote_url = self._file_url(remote_path)
         ISISClient.logger.debug("Deleting {}...".format(remote_url))
         r = requests.delete(remote_url)
-        catch_err(r)
+        _catch_err(r)
         ISISClient.logger.debug("{} deleted successfully".format(remote_url))
 
     @staticmethod
@@ -50,7 +55,7 @@ class ISISClient:
         download_file = open(download_path, 'wb')
         response = requests.get(remote_url, stream=True)
 
-        catch_err(response)
+        _catch_err(response)
 
         with response, download_file:
             for chunk in response.iter_content(chunk_size=ISISClient._DL_CHUNK_SIZE):
@@ -97,7 +102,7 @@ class ISISRequest:
                 "/".join([self._server_url, "files"]),
                 files=file_uploads
             )
-            catch_err(r)
+            _catch_err(r)
 
         r = requests.post(
             "/".join([self._server_url, "isis"]),
@@ -106,6 +111,6 @@ class ISISRequest:
                 "args": command_args
             }
         )
-        catch_err(r)
+        _catch_err(r)
 
         self._logger.debug("Took {:.1f}s".format(time() - start_time))

@@ -7,7 +7,6 @@ dependencies:
   - python=3.6
   - pip
   - isis>=6.0.0
-  - kalasiris>=1.9.1
   - pip:
       - connexion[swagger-ui]>=2.9.0
       - requests>=2.26.0

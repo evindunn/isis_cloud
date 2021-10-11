@@ -15,7 +15,7 @@ def upload_file():
 
 
 def retrieve_file(file_name):
-    file_path = path_join(ISISServerConfig.work_dir(), file_name)
+    file_path = path_join(ISISServerConfig.work_dir(), file_name.strip("/"))
     if not path_exists(file_path):
         return {"message": "File not found"}, 404
 
@@ -23,7 +23,7 @@ def retrieve_file(file_name):
 
 
 def delete_file(file_name):
-    file_path = path_join(ISISServerConfig.work_dir(), file_name)
+    file_path = path_join(ISISServerConfig.work_dir(), file_name.strip("/"))
     if not path_exists(file_path):
         return {"message": "File not found"}, 404
 
