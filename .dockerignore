@@ -1,0 +1,5 @@
+.idea/
+.work/
+**/*.pyc
+*.IMG
+*.png

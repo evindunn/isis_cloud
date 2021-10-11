@@ -7,3 +7,4 @@ if "ISISROOT" not in environ.keys():
 
 if "ISISDATA" not in environ.keys():
     environ["ISISDATA"] = path_join(environ["ISISROOT"], "data")
+

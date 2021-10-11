@@ -5,15 +5,16 @@ from os import remove
 from flask import request
 from kalasiris import kalasiris
 
-from isis_cloud._config import ISISServerConfig
+from .._config import ISISServerConfig
 
 
 def run_isis():
     orig_dir = getcwd()
-    chdir(ISISServerConfig.WORK_DIR)
+    chdir(ISISServerConfig.work_dir())
+
 
     try:
-        req = request.json
+        req = request.get_json()
 
         command = req.pop("command")
         command_args = req["args"]
