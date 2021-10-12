@@ -165,7 +165,8 @@ client.rm(proj_file)
 color_mos_file = "{}.mos.cub".format(output_file_prefix)
 
 hicolormos = client.command("hicolormos")
-hicolormos.add_arg("from1", mapped_file)
+hicolormos.add_arg("from1", "{}+2".format(mapped_file))
+hicolormos.add_arg("from2", "{}+3".format(mapped_file))
 hicolormos.add_arg("to", color_mos_file)
 hicolormos.send()
 
