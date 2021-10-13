@@ -1,5 +1,7 @@
+import json
 from os.path import basename
 from time import time
+from pvl import load as pvl_load
 
 import requests
 from urllib.parse import quote_plus as url_quote
@@ -46,6 +48,10 @@ class ISISClient:
         r = requests.delete(remote_url)
         _catch_err(r)
         ISISClient.logger.debug("{} deleted successfully".format(remote_url))
+
+    @staticmethod
+    def parse_cube_label(cube_file):
+        return pvl_load(cube_file)
 
     @staticmethod
     def fetch(remote_url, download_path):
@@ -104,13 +110,20 @@ class ISISRequest:
             )
             _catch_err(r)
 
+        cmd_req = {
+            "command": self._command,
+            "args": command_args
+        }
+
         r = requests.post(
             "/".join([self._server_url, "isis"]),
-            json={
-                "command": self._command,
-                "args": command_args
-            }
+            json=cmd_req
         )
-        _catch_err(r)
+
+        try:
+            _catch_err(r)
+        except RuntimeError as e:
+            self._logger.error(json.dumps(cmd_req))
+            raise e
 
         self._logger.debug("Took {:.1f}s".format(time() - start_time))

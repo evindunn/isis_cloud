@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from sys import path as sys_path
 from os.path import dirname, basename, join as path_join, exists as path_exists, realpath, splitext
-from os import makedirs
+from os import makedirs, remove
 from logging import basicConfig as logConfig, getLogger, DEBUG, ERROR
+from tempfile import TemporaryDirectory
 from urllib.parse import urlparse
+from re import search as re_search
+
+# Thanks to
+# https://repository.si.edu/bitstream/handle/10088/19366/nasm_201048.pdf?sequence=1&isAllowed=y
+# for this
 
 pkg_dir = dirname(dirname(realpath(__file__)))
 sys_path.insert(0, pkg_dir)
@@ -21,59 +28,104 @@ getLogger("urllib3.connectionpool").setLevel(ERROR)
 
 data_dir = "/data/disk/hirise_jezero"
 output_dir = path_join(data_dir, "output")
-
-for directory in [data_dir, output_dir]:
-    if not path_exists(directory):
-        makedirs(directory)
-
-input_urls = [
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/ESP/ORB_011600_011699/ESP_011630_1985/ESP_011630_1985_RED5_0.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/ESP/ORB_011600_011699/ESP_011630_1985/ESP_011630_1985_RED5_1.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/ESP/ORB_011600_011699/ESP_011630_1985/ESP_011630_1985_BG13_0.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/ESP/ORB_011600_011699/ESP_011630_1985/ESP_011630_1985_BG13_1.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/ESP/ORB_011600_011699/ESP_011630_1985/ESP_011630_1985_IR11_0.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/ESP/ORB_011600_011699/ESP_011630_1985/ESP_011630_1985_IR11_1.IMG",
-]
-input_files = list()
-output_file_prefix = "ESP_011630_1985"
-
 client = ISISClient("http://127.0.0.1:8080/api/v1")
 
-with ThreadPoolExecutor() as pool:
-    for input_url in input_urls:
-        input_url_parsed = urlparse(input_url)
-        download_file = path_join(data_dir, basename(input_url_parsed.path))
 
-        if not path_exists(download_file):
-            pool.submit(ISISClient.fetch, input_url, download_file)
+class HiRISEChannel:
+    def __init__(self, red_url, bg_url, ir_url):
+        dl_files = list()
 
-        input_files.append(download_file)
+        with ThreadPoolExecutor() as pool:
+            for url in [red_url, bg_url, ir_url]:
+                url_parsed = urlparse(url)
+                dl_file = path_join(data_dir, basename(url_parsed.path))
+                dl_files.append(dl_file)
+                if not path_exists(dl_file):
+                    pool.submit(ISISClient.fetch, url, dl_file)
 
-reduce_size = (512, 30000)
-summing_mode = 2
-red = input_files[0:2]
-blue_green = input_files[2:4]
-ir = input_files[4:6]
+        self.red = dl_files[0]
+        self.bg = dl_files[1]
+        self.ir = dl_files[2]
 
-for file_lst in [red, blue_green, ir]:
-    for idx, file in enumerate(file_lst):
-        file_basename = basename(file)
-        file_basename, _ = splitext(file_basename)
+    def process(self):
+        self._convert_to_cubes()
+        self._enlarge_bg_ir()
+        self._fix_jitter()
 
-        cub_file = "{}.cub".format(file_basename)
+    def _convert_to_cubes(self):
+        threads = list()
+        with ThreadPoolExecutor() as pool:
+            for file in [self.red, self.bg, self.ir]:
+                threads.append(
+                    pool.submit(HiRISEChannel._convert_to_cube, file)
+                )
+
+        self.red = threads[0].result()
+        self.bg = threads[1].result()
+        self.ir = threads[2].result()
+
+    def _enlarge_bg_ir(self):
+        enlarge_size = [0, 0]
+
+        with TemporaryDirectory() as tmp_dir:
+            red_dl = path_join(tmp_dir, self.red)
+            client.download(self.red, red_dl)
+            red_lbl = ISISClient.parse_cube_label(red_dl)
+
+            enlarge_size[0] = red_lbl["IsisCube"]["Core"]["Dimensions"]["Samples"]
+            enlarge_size[1] = red_lbl["IsisCube"]["Core"]["Dimensions"]["Lines"]
+            summing_mode = red_lbl["IsisCube"]["Instrument"]["Summing"]
+
+        with ThreadPoolExecutor() as pool:
+            threads = list()
+            for file in [self.bg, self.ir]:
+                thread = pool.submit(
+                    HiRISEChannel._resize_ir_bg,
+                    file,
+                    enlarge_size,
+                    summing_mode
+                )
+                threads.append(thread)
+
+        self.bg = threads[0].result()
+        self.ir = threads[1].result()
+
+    def _fix_jitter(self):
+        with ThreadPoolExecutor() as pool:
+            threads = list()
+            for file in [self.bg, self.ir]:
+                thread = pool.submit(
+                    HiRISEChannel._fix_jitter_single,
+                    self.red,
+                    file
+                )
+                threads.append(thread)
+
+        self.bg = threads[0].result()
+        self.ir = threads[1].result()
+
+    @staticmethod
+    def strip_ext(file_name):
+        return basename(file_name).split(".")[0]
+
+    @staticmethod
+    def _convert_to_cube(hirise_img):
+        hirise_basename = HiRISEChannel.strip_ext(hirise_img)
+
+        cub_file = "{}.cub".format(hirise_basename)
         hi2isis = client.command("hi2isis")
-        hi2isis.add_file_arg("from", file)
+        hi2isis.add_file_arg("from", hirise_img)
         hi2isis.add_arg("to", cub_file)
         hi2isis.send()
 
-        client.rm(basename(file))
+        client.rm(basename(hirise_img))
 
         spiceinit = client.command("spiceinit")
         spiceinit.add_arg("from", cub_file)
-        spiceinit.add_arg("web", "true")
+        # spiceinit.add_arg("web", "true")
         spiceinit.send()
 
-        cal_file = "{}.cal.cub".format(file_basename)
+        cal_file = "{}.cal.cub".format(hirise_basename)
         hical = client.command("hical")
         hical.add_arg("from", cub_file)
         hical.add_arg("to", cal_file)
@@ -81,110 +133,93 @@ for file_lst in [red, blue_green, ir]:
 
         client.rm(cub_file)
 
-        reduced_file = "{}.reduced.cub".format(file_basename)
+        return cal_file
 
-        reduce = client.command("reduce")
-        reduce.add_arg("from", cal_file)
-        reduce.add_arg("mode", "total")
-        reduce.add_arg("ons", reduce_size[0])
-        reduce.add_arg("onl", reduce_size[1])
-        reduce.add_arg("to", reduced_file)
-        reduce.send()
+    @staticmethod
+    def _resize_ir_bg(color_cube, resize_dims, summing_mode):
+        enlarged_file = "{}.enlarged.cub".format(HiRISEChannel.strip_ext(color_cube))
 
-        client.rm(cal_file)
+        enlarge = client.command("enlarge")
+        enlarge.add_arg("from", color_cube)
+        enlarge.add_arg("mode", "total")
+        enlarge.add_arg("interp", "bilinear")
+        enlarge.add_arg("ons", resize_dims[0])
+        enlarge.add_arg("onl", resize_dims[1])
+        enlarge.add_arg("to", enlarged_file)
+        enlarge.send()
 
         editlab = client.command("editlab")
-        editlab.add_arg("from", reduced_file)
+        editlab.add_arg("from", enlarged_file)
         editlab.add_arg("grpname", "Instrument")
         editlab.add_arg("keyword", "Summing")
         editlab.add_arg("value", summing_mode)
         editlab.send()
 
-        file_lst[idx] = reduced_file
+        client.rm(color_cube)
+        return enlarged_file
 
-for stitched_file, file_lst in [("red.cub", red), ("bg.cub", blue_green), ("ir.cub", ir)]:
-    histitch = client.command("histitch")
-    histitch.add_arg("from1", file_lst[0])
-    histitch.add_arg("from2", file_lst[1])
-    histitch.add_arg("to", stitched_file)
-    histitch.send()
+    @staticmethod
+    def _fix_jitter_single(red, other_color):
+        other_color_basename = HiRISEChannel.strip_ext(other_color)
+        cnet_file = "{}.cnet".format(other_color_basename)
+        slithered_file = "{}.slither.cub".format(other_color_basename)
 
-    for file in file_lst:
-        client.rm(file)
+        hijitreg = client.command("hijitreg")
+        hijitreg.add_arg("from", other_color)
+        hijitreg.add_arg("match", red)
+        hijitreg.add_arg("cnetfile", cnet_file)
+        hijitreg.send()
 
-for stitched_file in ["bg.cub", "ir.cub"]:
-    cnet_file = "{}.cnet".format(stitched_file)
+        slither = client.command("slither")
+        slither.add_arg("from", other_color)
+        slither.add_arg("control", cnet_file)
+        slither.add_arg("to", slithered_file)
+        slither.send()
 
-    hijitreg = client.command("hijitreg")
-    hijitreg.add_arg("from", stitched_file)
-    hijitreg.add_arg("match", "red.cub")
-    hijitreg.add_arg("cnetfile", cnet_file)
-    hijitreg.send()
+        client.rm(cnet_file)
+        client.rm(other_color)
 
-    slithered_file = stitched_file.replace(".cub", ".slither.cub")
+        return slithered_file
 
-    slither = client.command("slither")
-    slither.add_arg("from", stitched_file)
-    slither.add_arg("control", cnet_file)
-    slither.add_arg("to", slithered_file)
-    slither.send()
 
-    client.rm(stitched_file)
-    client.rm(cnet_file)
+for directory in [data_dir, output_dir]:
+    if not path_exists(directory):
+        makedirs(directory)
 
-stacked_file = "{}.cub".format(output_file_prefix)
+ir10_red4_bg12_0 = HiRISEChannel(
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_RED4_0.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_BG12_0.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_IR10_0.IMG",
+)
 
-hicubeit = client.command("hicubeit")
-hicubeit.add_arg("red", "red.cub")
-hicubeit.add_arg("ir", "ir.slither.cub")
-hicubeit.add_arg("bg", "bg.slither.cub")
-hicubeit.add_arg("to", stacked_file)
-hicubeit.send()
+ir10_red4_bg12_1 = HiRISEChannel(
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_RED4_1.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_BG12_1.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_IR10_1.IMG",
+)
 
-for file in ["red.cub", "ir.slither.cub", "bg.slither.cub"]:
-    client.rm(file)
+ir11_red5_bg13_0 = HiRISEChannel(
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_RED5_0.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_BG13_0.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_IR11_0.IMG",
+)
 
-mapped_file = "{}.mapped.cub".format(output_file_prefix)
-proj_file = "simple-cylindrical.map"
+ir11_red5_bg13_1 = HiRISEChannel(
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_RED5_1.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_BG13_1.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_IR11_1.IMG",
+)
 
-maptemplate = client.command("maptemplate")
-maptemplate.add_arg("projection", "SimpleCylindrical")
-maptemplate.add_arg("clon", 0.0)
-maptemplate.add_arg("map", proj_file)
-maptemplate.send()
+# ThreadPool inception
+with ThreadPoolExecutor() as pool:
+    for channel_grp in [ir10_red4_bg12_0, ir10_red4_bg12_1, ir11_red5_bg13_0, ir11_red5_bg13_1]:
+        pool.submit(channel_grp.process)
 
-cam2map = client.command("cam2map")
-cam2map.add_arg("from", stacked_file)
-cam2map.add_arg("map", proj_file)
-cam2map.add_arg("to", mapped_file)
-cam2map.send()
-
-client.rm(stacked_file)
-client.rm(proj_file)
-
-color_mos_file = "{}.mos.cub".format(output_file_prefix)
-
-hicolormos = client.command("hicolormos")
-hicolormos.add_arg("from1", "{}+2".format(mapped_file))
-hicolormos.add_arg("from2", "{}+3".format(mapped_file))
-hicolormos.add_arg("to", color_mos_file)
-hicolormos.send()
-
-client.rm(mapped_file)
-
-final_outfile = "{}.tif".format(output_file_prefix)
-
-isis2std = client.command("isis2std")
-isis2std.add_arg("mode", "rgb")
-isis2std.add_arg("red", "{}+1".format(color_mos_file))
-isis2std.add_arg("green", "{}+2".format(color_mos_file))
-isis2std.add_arg("blue", "{}+3".format(color_mos_file))
-isis2std.add_arg("to", final_outfile)
-isis2std.add_arg("format", "tif")
-isis2std.send()
-
-client.rm(color_mos_file)
-
-client.download(final_outfile, path_join(output_dir, final_outfile))
-
-client.rm(final_outfile)
+"""
+Then:
+gdal_translate PSP_008831_1455.tif red.tif -b 2
+gdal_translate PSP_008831_1455.tif green.tif -b 3
+gdal_calc.py -A red.tif -B green.tif --calc='(B * 2) - (A * 0.3)' --outfile=blue.tif --overwrite
+gdalbuildvrt -separate rgb.vrt red.tif green.tif blue.tif -overwrite
+gdal_translate -colorinterp_1 red -colorinterp_2 green -colorinterp_3 blue rgb.vrt rgb.tif
+"""

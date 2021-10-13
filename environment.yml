@@ -6,7 +6,8 @@ channels:
 dependencies:
   - python=3.6
   - pip
-  - isis>=6.0.0
+  - isis>=6.0.0,<7.0.0
+  - pvl>=0.3.0
   - pip:
       - connexion[swagger-ui]>=2.9.0
       - gunicorn>=20.1.0

@@ -13,6 +13,12 @@ from .._config import ISISServerConfig
 def _serialize_command_args(arg_dict):
     args = list()
     for k, v in arg_dict.items():
+        if isinstance(v, list):
+            list_file = "{}.lis".format(k)
+            with open(list_file, 'w') as f:
+                f.writelines(v)
+            v = list_file
+
         args.append("{}={}".format(k, str(v)))
     return args
 
@@ -35,10 +41,6 @@ def run_isis():
             return jsonify({"message": "Command not found"}), 404
 
         command_args = _serialize_command_args(req["args"])
-
-        for file in ["print.prt", "errors.prt"]:
-            if path_exists(file):
-                remove(file)
 
         status = 200
         response = {"message": "Command executed successfully"}
