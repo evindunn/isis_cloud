@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import concurrent.futures
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from sys import path as sys_path
 from os.path import dirname, basename, join as path_join, exists as path_exists, realpath, splitext
@@ -12,6 +13,7 @@ from re import search as re_search
 # Thanks to
 # https://repository.si.edu/bitstream/handle/10088/19366/nasm_201048.pdf?sequence=1&isAllowed=y
 # for this
+from uuid import uuid4
 
 pkg_dir = dirname(dirname(realpath(__file__)))
 sys_path.insert(0, pkg_dir)
@@ -31,12 +33,12 @@ output_dir = path_join(data_dir, "output")
 client = ISISClient("http://127.0.0.1:8080/api/v1")
 
 
-class HiRISEChannel:
-    def __init__(self, red_url, bg_url, ir_url):
+class HiRISEChannelProcessor:
+    def __init__(self, red_url, bg_url):
         dl_files = list()
 
         with ThreadPoolExecutor() as pool:
-            for url in [red_url, bg_url, ir_url]:
+            for url in [red_url, bg_url]:
                 url_parsed = urlparse(url)
                 dl_file = path_join(data_dir, basename(url_parsed.path))
                 dl_files.append(dl_file)
@@ -45,64 +47,177 @@ class HiRISEChannel:
 
         self.red = dl_files[0]
         self.bg = dl_files[1]
-        self.ir = dl_files[2]
+
+        self._red_orig_binning = 0
+        self._bg_orig_binning = 0
 
     def process(self):
         self._convert_to_cubes()
-        self._enlarge_bg_ir()
+        self._enlarge_bg()
         self._fix_jitter()
+        self._propagate_red_highfreq()
+        self._reproject()
 
     def _convert_to_cubes(self):
         threads = list()
         with ThreadPoolExecutor() as pool:
-            for file in [self.red, self.bg, self.ir]:
+            for file in [self.red, self.bg]:
                 threads.append(
-                    pool.submit(HiRISEChannel._convert_to_cube, file)
+                    pool.submit(HiRISEChannelProcessor._convert_to_cube, file)
                 )
 
         self.red = threads[0].result()
         self.bg = threads[1].result()
-        self.ir = threads[2].result()
 
-    def _enlarge_bg_ir(self):
+    def _enlarge_bg(self):
         enlarge_size = [0, 0]
 
         with TemporaryDirectory() as tmp_dir:
             red_dl = path_join(tmp_dir, self.red)
-            client.download(self.red, red_dl)
+            bg_dl = path_join(tmp_dir, self.bg)
+
+            with ThreadPoolExecutor() as pool:
+                for file, dl_file in [(self.red, red_dl), (self.bg, bg_dl)]:
+                    pool.submit(
+                        client.download,
+                        file,
+                        dl_file
+                    )
+
             red_lbl = ISISClient.parse_cube_label(red_dl)
+            bg_lbl = ISISClient.parse_cube_label(bg_dl)
 
             enlarge_size[0] = red_lbl["IsisCube"]["Core"]["Dimensions"]["Samples"]
             enlarge_size[1] = red_lbl["IsisCube"]["Core"]["Dimensions"]["Lines"]
             summing_mode = red_lbl["IsisCube"]["Instrument"]["Summing"]
 
-        with ThreadPoolExecutor() as pool:
-            threads = list()
-            for file in [self.bg, self.ir]:
-                thread = pool.submit(
-                    HiRISEChannel._resize_ir_bg,
-                    file,
-                    enlarge_size,
-                    summing_mode
-                )
-                threads.append(thread)
+            self._red_orig_binning = summing_mode
+            self._bg_orig_binning = bg_lbl["IsisCube"]["Instrument"]["Summing"]
 
-        self.bg = threads[0].result()
-        self.ir = threads[1].result()
+            enlarged_file = "{}.enlarged.cub".format(
+                HiRISEChannelProcessor.strip_ext(self.bg)
+            )
+
+            enlarge = client.command("enlarge")
+            enlarge.add_arg("from", self.bg)
+            enlarge.add_arg("mode", "total")
+            enlarge.add_arg("interp", "bilinear")
+            enlarge.add_arg("ons", enlarge_size[0])
+            enlarge.add_arg("onl", enlarge_size[1])
+            enlarge.add_arg("to", enlarged_file)
+            enlarge.send()
+
+            editlab = client.command("editlab")
+            editlab.add_arg("from", enlarged_file)
+            editlab.add_arg("grpname", "Instrument")
+            editlab.add_arg("keyword", "Summing")
+            editlab.add_arg("value", summing_mode)
+            editlab.send()
+
+            client.rm(self.bg)
+            self.bg = enlarged_file
 
     def _fix_jitter(self):
-        with ThreadPoolExecutor() as pool:
-            threads = list()
-            for file in [self.bg, self.ir]:
-                thread = pool.submit(
-                    HiRISEChannel._fix_jitter_single,
-                    self.red,
-                    file
-                )
-                threads.append(thread)
+        bg_basename = HiRISEChannelProcessor.strip_ext(self.bg)
+        cnet_file = "{}.cnet".format(bg_basename)
+        slithered_file = "{}.slither.cub".format(bg_basename)
 
-        self.bg = threads[0].result()
-        self.ir = threads[1].result()
+        hijitreg = client.command("hijitreg")
+        hijitreg.add_arg("from", self.bg)
+        hijitreg.add_arg("match", self.red)
+        hijitreg.add_arg("cnetfile", cnet_file)
+        hijitreg.send()
+
+        slither = client.command("slither")
+        slither.add_arg("from", self.bg)
+        slither.add_arg("control", cnet_file)
+        slither.add_arg("to", slithered_file)
+        slither.send()
+
+        client.rm(cnet_file)
+        client.rm(self.bg)
+
+        self.bg = slithered_file
+
+    def _propagate_red_highfreq(self):
+        bg_basename = HiRISEChannelProcessor.strip_ext(self.bg)
+
+        ratio_img = "{}_red.cub".format(bg_basename)
+        ratio_img_lowpass = "{}_red.lowpass.cub".format(bg_basename)
+        bg_img_filtered = "{}.filtered.cub".format(bg_basename)
+
+        ratio = client.command("ratio")
+        ratio.add_arg("numerator", self.bg)
+        ratio.add_arg("denominator", self.red)
+        ratio.add_arg("to", ratio_img)
+        ratio.send()
+
+        if self._bg_orig_binning == 2:
+            boxcar_size = 3
+        elif self._bg_orig_binning == 4:
+            boxcar_size = 5
+        else:
+            err = "Invalid binning for {} (got {}, expected 2 or 4)".format(
+                self.bg,
+                self._bg_orig_binning
+            )
+            raise RuntimeError(err)
+
+        lowpass = client.command("lowpass")
+        lowpass.add_arg("from", ratio_img)
+        lowpass.add_arg("samples", boxcar_size)
+        lowpass.add_arg("lines", boxcar_size)
+        lowpass.add_arg("to", ratio_img_lowpass)
+        lowpass.send()
+
+        client.rm(ratio_img)
+
+        fx = client.command("fx")
+        fx.add_arg("f1", ratio_img_lowpass)
+        fx.add_arg("f2", self.red)
+        fx.add_arg("equation", "f1 * f2")
+        fx.add_arg("to", bg_img_filtered)
+        fx.send()
+
+        client.rm(ratio_img_lowpass)
+        client.rm(self.bg)
+
+        self.bg = bg_img_filtered
+
+    def _reproject(self):
+        map_file = "{}.map".format(uuid4())
+        maptemplate = client.command("maptemplate")
+        maptemplate.add_arg("projection", "equirectangular")
+        maptemplate.add_arg("clat", 0.0)
+        maptemplate.add_arg("clon", 0.0)
+        maptemplate.add_arg("map", map_file)
+        maptemplate.send()
+
+        threads = list()
+        with ThreadPoolExecutor() as pool:
+            reproj_inputs = [
+                (self.red, self._red_orig_binning),
+                (self.bg, self._bg_orig_binning),
+            ]
+
+            for file, orig_binning in reproj_inputs:
+                threads.append(
+                    pool.submit(
+                        HiRISEChannelProcessor._reproject_single,
+                        file,
+                        map_file,
+                        orig_binning
+                    )
+                )
+
+        self.red = threads[0].result()
+        self.bg = threads[1].result()
+
+        client.rm(map_file)
+
+    def cleanup(self):
+        client.rm(self.red)
+        client.rm(self.bg)
 
     @staticmethod
     def strip_ext(file_name):
@@ -110,7 +225,7 @@ class HiRISEChannel:
 
     @staticmethod
     def _convert_to_cube(hirise_img):
-        hirise_basename = HiRISEChannel.strip_ext(hirise_img)
+        hirise_basename = HiRISEChannelProcessor.strip_ext(hirise_img)
 
         cub_file = "{}.cub".format(hirise_basename)
         hi2isis = client.command("hi2isis")
@@ -136,90 +251,102 @@ class HiRISEChannel:
         return cal_file
 
     @staticmethod
-    def _resize_ir_bg(color_cube, resize_dims, summing_mode):
-        enlarged_file = "{}.enlarged.cub".format(HiRISEChannel.strip_ext(color_cube))
+    def _reproject_single(cube_file, map_file, orig_binning):
+        cube_file_mapped = "{}.mapped.cub".format(
+            HiRISEChannelProcessor.strip_ext(cube_file)
+        )
 
-        enlarge = client.command("enlarge")
-        enlarge.add_arg("from", color_cube)
-        enlarge.add_arg("mode", "total")
-        enlarge.add_arg("interp", "bilinear")
-        enlarge.add_arg("ons", resize_dims[0])
-        enlarge.add_arg("onl", resize_dims[1])
-        enlarge.add_arg("to", enlarged_file)
-        enlarge.send()
+        if orig_binning == 1:
+            resolution = 0.25
+        elif orig_binning == 2:
+            resolution = 0.5
+        elif orig_binning == 4:
+            resolution = 1.0
+        else:
+            err = "Invalid binning for {} (expected 1, 2, or 4, got {})".format(
+                cube_file,
+                orig_binning
+            )
+            raise RuntimeError(err)
 
-        editlab = client.command("editlab")
-        editlab.add_arg("from", enlarged_file)
-        editlab.add_arg("grpname", "Instrument")
-        editlab.add_arg("keyword", "Summing")
-        editlab.add_arg("value", summing_mode)
-        editlab.send()
+        cam2map = client.command("cam2map")
+        cam2map.add_arg("from", cube_file)
+        cam2map.add_arg("map", map_file)
+        cam2map.add_arg("to", cube_file_mapped)
+        cam2map.add_arg("pixres", "mpp")
+        cam2map.add_arg("resolution", resolution)
+        cam2map.send()
 
-        client.rm(color_cube)
-        return enlarged_file
+        client.rm(cube_file)
 
-    @staticmethod
-    def _fix_jitter_single(red, other_color):
-        other_color_basename = HiRISEChannel.strip_ext(other_color)
-        cnet_file = "{}.cnet".format(other_color_basename)
-        slithered_file = "{}.slither.cub".format(other_color_basename)
-
-        hijitreg = client.command("hijitreg")
-        hijitreg.add_arg("from", other_color)
-        hijitreg.add_arg("match", red)
-        hijitreg.add_arg("cnetfile", cnet_file)
-        hijitreg.send()
-
-        slither = client.command("slither")
-        slither.add_arg("from", other_color)
-        slither.add_arg("control", cnet_file)
-        slither.add_arg("to", slithered_file)
-        slither.send()
-
-        client.rm(cnet_file)
-        client.rm(other_color)
-
-        return slithered_file
+        return cube_file_mapped
 
 
 for directory in [data_dir, output_dir]:
     if not path_exists(directory):
         makedirs(directory)
 
-ir10_red4_bg12_0 = HiRISEChannel(
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_RED4_0.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_BG12_0.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_IR10_0.IMG",
+image_path = "EDR/PSP/ORB_008800_008899/PSP_008831_1455"
+image_id = "PSP_008831_1455"
+
+red4_bg12_0 = HiRISEChannelProcessor(
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/{}/{}_RED4_0.IMG".format(image_path, image_id),
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/{}/{}_BG12_0.IMG".format(image_path, image_id),
 )
 
-ir10_red4_bg12_1 = HiRISEChannel(
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_RED4_1.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_BG12_1.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_IR10_1.IMG",
-)
-
-ir11_red5_bg13_0 = HiRISEChannel(
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_RED5_0.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_BG13_0.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_IR11_0.IMG",
-)
-
-ir11_red5_bg13_1 = HiRISEChannel(
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_RED5_1.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_BG13_1.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/EDR/PSP/ORB_008800_008899/PSP_008831_1455/PSP_008831_1455_IR11_1.IMG",
+red5_bg13_0 = HiRISEChannelProcessor(
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/{}/{}_RED5_0.IMG".format(image_path, image_id),
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/{}/{}_BG13_0.IMG".format(image_path, image_id),
 )
 
 # ThreadPool inception
 with ThreadPoolExecutor() as pool:
-    for channel_grp in [ir10_red4_bg12_0, ir10_red4_bg12_1, ir11_red5_bg13_0, ir11_red5_bg13_1]:
+    for channel_grp in [red4_bg12_0, red5_bg13_0]:
         pool.submit(channel_grp.process)
 
-"""
-Then:
-gdal_translate PSP_008831_1455.tif red.tif -b 2
-gdal_translate PSP_008831_1455.tif green.tif -b 3
-gdal_calc.py -A red.tif -B green.tif --calc='(B * 2) - (A * 0.3)' --outfile=blue.tif --overwrite
-gdalbuildvrt -separate rgb.vrt red.tif green.tif blue.tif -overwrite
-gdal_translate -colorinterp_1 red -colorinterp_2 green -colorinterp_3 blue rgb.vrt rgb.tif
-"""
+out_file_red = "{}_red.cub".format(image_id)
+out_file_green = "{}_green.cub".format(image_id)
+out_file_blue = "{}_blue.cub".format(image_id)
+out_file_rgb = "{}.tif".format(image_id)
+
+
+def mosaic_bands(out_file, band1, band2):
+    himos = client.command("himos")
+    himos.add_arg("fromlist", [band1, band2])
+    himos.add_arg("to", out_file)
+    himos.send()
+
+
+with ThreadPoolExecutor() as pool:
+    himos_targets = [
+        (out_file_red, [red4_bg12_0.red, red5_bg13_0.red]),
+        (out_file_green, [red4_bg12_0.bg, red5_bg13_0.bg]),
+    ]
+    for out_file, targets in himos_targets:
+        pool.submit(mosaic_bands, out_file, *targets)
+
+red4_bg12_0.cleanup()
+red5_bg13_0.cleanup()
+
+fx = client.command("fx")
+fx.add_arg("f1", out_file_green)
+fx.add_arg("f2", out_file_red)
+fx.add_arg("equation", "[2 * f1] - [0.3 * f2]")
+fx.add_arg("to", out_file_blue)
+fx.send()
+
+isis2std = client.command("isis2std")
+isis2std.add_arg("red", out_file_red)
+isis2std.add_arg("green", out_file_green)
+isis2std.add_arg("blue", out_file_blue)
+isis2std.add_arg("mode", "rgb")
+isis2std.add_arg("format", "tiff")
+isis2std.add_arg("to", out_file_rgb)
+isis2std.send()
+
+client.download(out_file_rgb, path_join(data_dir, out_file_rgb))
+
+client.rm(out_file_red)
+client.rm(out_file_green)
+client.rm(out_file_blue)
+client.rm(out_file_rgb)
