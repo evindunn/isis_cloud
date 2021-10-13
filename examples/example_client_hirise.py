@@ -14,6 +14,7 @@ from os import urandom
 # Thanks to
 # https://repository.si.edu/bitstream/handle/10088/19366/nasm_201048.pdf?sequence=1&isAllowed=y
 # https://github.com/USGS-Astrogeology/ISIS3/issues/3257#issuecomment-518856485
+
 # for this
 from uuid import uuid4
 
@@ -30,251 +31,88 @@ logConfig(
 getLogger("urllib3.connectionpool").setLevel(ERROR)
 
 
-data_dir = "/data/disk/hirise_jezero"
-output_dir = path_join(data_dir, "output")
-client = ISISClient("http://127.0.0.1:8080/api/v1")
+def strip_ext(file_path):
+    return file_path.split(".")[0]
 
 
-class HiRISEColorSetProcessor:
-    def __init__(self, combined_file, red_url, bg_url):
-        dl_files = list()
+class HiRISEDetectorProcessor:
+    _PDS_IMAGE_PREFIX = "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/{}/{}_{}_{}.IMG"
 
-        with ThreadPoolExecutor() as pool:
-            for url in [red_url, bg_url]:
-                url_parsed = urlparse(url)
-                dl_file = path_join(data_dir, basename(url_parsed.path))
-                dl_files.append(dl_file)
-                if not path_exists(dl_file):
-                    pool.submit(ISISClient.fetch, url, dl_file)
-
-        self.red = dl_files[0]
-        self.bg = dl_files[1]
-        self.synth_blue = "{}_{}.cub".format(
-            re_sub(r"RED\d", "BLUE", HiRISEColorSetProcessor.strip_ext(basename(self.red))),
-            urandom(4).hex()
+    def __init__(self, isis_client: ISISClient, download_dir: str, pdsimage_path: str, pdsimage_id: str, detector: str):
+        self._isis_client = isis_client
+        self._download_dir = download_dir
+        self.image_id = pdsimage_id
+        self.detector = detector
+        self.channel0 = HiRISEDetectorProcessor.get_img_url(
+            pdsimage_path,
+            pdsimage_id,
+            detector,
+            0
         )
-        self.combined = combined_file
-
-        self._red_orig_binning = 0
-        self._bg_orig_binning = 0
+        self.channel1 = HiRISEDetectorProcessor.get_img_url(
+            pdsimage_path,
+            pdsimage_id,
+            detector,
+            1
+        )
+        self.stitched = None
 
     def process(self):
+        self._download_inputs()
         self._convert_to_cubes()
-        self._enlarge_bg()
-        self._fix_jitter()
-        self._generate_synth_blue()
-        self._propagate_red_highfreq()
-        self._combine()
-        self._reproject()
+        self._stitch_channels()
+
+    def _download_inputs(self):
+        channel_dls = list()
+        with ThreadPoolExecutor() as pool:
+            for channel in [self.channel0, self.channel1]:
+                url_parsed = urlparse(channel)
+                out_file = path_join(self._download_dir, basename(url_parsed.path))
+                pool.submit(ISISClient.fetch, channel, out_file)
+                channel_dls.append(out_file)
+
+        self.channel0 = channel_dls[0]
+        self.channel1 = channel_dls[1]
 
     def _convert_to_cubes(self):
-        threads = list()
+        cube_files = list()
         with ThreadPoolExecutor() as pool:
-            for file in [self.red, self.bg]:
-                threads.append(
-                    pool.submit(HiRISEColorSetProcessor._convert_to_cube, file)
+            for channel in [self.channel0, self.channel1]:
+                t = pool.submit(
+                    HiRISEDetectorProcessor._convert_to_cube,
+                    self._isis_client,
+                    channel
                 )
+                cube_files.append(t)
 
-        self.red = threads[0].result()
-        self.bg = threads[1].result()
+        self._isis_client.rm(basename(self.channel0))
+        self._isis_client.rm(basename(self.channel1))
 
-    def _enlarge_bg(self):
-        with TemporaryDirectory() as tmp_dir:
-            red_dl = path_join(tmp_dir, self.red)
-            bg_dl = path_join(tmp_dir, self.bg)
+        self.channel0 = cube_files[0].result()
+        self.channel1 = cube_files[1].result()
 
-            with ThreadPoolExecutor() as pool:
-                for file, dl_file in [(self.red, red_dl), (self.bg, bg_dl)]:
-                    pool.submit(
-                        client.download,
-                        file,
-                        dl_file
-                    )
+    def _stitch_channels(self):
+        out_file = "{}_{}.cub".format(self.image_id, self.detector)
+        histitch = self._isis_client.command("histitch")
+        histitch.add_arg("from1", self.channel0)
+        histitch.add_arg("from2", self.channel1)
+        histitch.add_arg("to", out_file)
+        histitch.send()
 
-            red_lbl = ISISClient.parse_cube_label(red_dl)
-            bg_lbl = ISISClient.parse_cube_label(bg_dl)
-
-            optical_distortion_correct = 1.0006
-
-            self._red_orig_binning = red_lbl["IsisCube"]["Instrument"]["Summing"]
-            self._bg_orig_binning = bg_lbl["IsisCube"]["Instrument"]["Summing"]
-
-            red_samples = red_lbl["IsisCube"]["Core"]["Dimensions"]["Samples"]
-            red_lines = red_lbl["IsisCube"]["Core"]["Dimensions"]["Lines"]
-
-            scale_factor = (
-                float(self._bg_orig_binning) /
-                float(self._red_orig_binning) *
-                optical_distortion_correct
-            )
-
-            enlarged_file = "{}.enlarged.cub".format(
-                HiRISEColorSetProcessor.strip_ext(self.bg)
-            )
-
-            enlarge = client.command("enlarge")
-            enlarge.add_arg("from", self.bg)
-            enlarge.add_arg("interp", "bilinear")
-            enlarge.add_arg("sscale", scale_factor)
-            enlarge.add_arg("lscale", scale_factor)
-            enlarge.add_arg("to", enlarged_file)
-            enlarge.send()
-
-            cropped_file = "{}.cropped.cub".format(
-                HiRISEColorSetProcessor.strip_ext(self.bg)
-            )
-
-            crop = client.command("crop")
-            crop.add_arg("from", enlarged_file)
-            crop.add_arg("nsamples", red_samples)
-            crop.add_arg("nlines", red_lines)
-            crop.add_arg("to", cropped_file)
-            crop.send()
-
-            client.rm(enlarged_file)
-
-            editlab = client.command("editlab")
-            editlab.add_arg("from", cropped_file)
-            editlab.add_arg("grpname", "Instrument")
-            editlab.add_arg("keyword", "Summing")
-            editlab.add_arg("value", self._red_orig_binning)
-            editlab.send()
-
-            client.rm(self.bg)
-            self.bg = cropped_file
-
-    def _fix_jitter(self):
-        bg_basename = HiRISEColorSetProcessor.strip_ext(self.bg)
-        cnet_file = "{}.cnet".format(bg_basename)
-        slithered_file = "{}.slither.cub".format(bg_basename)
-
-        hijitreg = client.command("hijitreg")
-        hijitreg.add_arg("from", self.bg)
-        hijitreg.add_arg("match", self.red)
-        hijitreg.add_arg("cnetfile", cnet_file)
-        hijitreg.send()
-
-        slither = client.command("slither")
-        slither.add_arg("from", self.bg)
-        slither.add_arg("control", cnet_file)
-        slither.add_arg("to", slithered_file)
-        slither.send()
-
-        client.rm(cnet_file)
-        client.rm(self.bg)
-
-        self.bg = slithered_file
-
-    def _generate_synth_blue(self):
-        fx = client.command("fx")
-        fx.add_arg("f1", self.bg)
-        fx.add_arg("f2", self.red)
-        fx.add_arg("equation", "[2 * f1] - [0.3 * f2]")
-        fx.add_arg("to", self.synth_blue)
-        fx.send()
-
-    def _propagate_red_highfreq(self):
-        bg_basename = HiRISEColorSetProcessor.strip_ext(self.bg)
-
-        ratio_img = "{}_red.cub".format(bg_basename)
-        ratio_img_lowpass = "{}_red.lowpass.cub".format(bg_basename)
-        bg_img_filtered = "{}.filtered.cub".format(bg_basename)
-
-        ratio = client.command("ratio")
-        ratio.add_arg("numerator", self.bg)
-        ratio.add_arg("denominator", self.red)
-        ratio.add_arg("to", ratio_img)
-        ratio.send()
-
-        if self._bg_orig_binning == 2:
-            boxcar_size = 3
-        elif self._bg_orig_binning == 4:
-            boxcar_size = 5
-        else:
-            err = "Invalid binning for {} (got {}, expected 2 or 4)".format(
-                self.bg,
-                self._bg_orig_binning
-            )
-            raise RuntimeError(err)
-
-        lowpass = client.command("lowpass")
-        lowpass.add_arg("from", ratio_img)
-        lowpass.add_arg("samples", boxcar_size)
-        lowpass.add_arg("lines", boxcar_size)
-        lowpass.add_arg("to", ratio_img_lowpass)
-        lowpass.send()
-
-        client.rm(ratio_img)
-
-        fx = client.command("fx")
-        fx.add_arg("f1", ratio_img_lowpass)
-        fx.add_arg("f2", self.red)
-        fx.add_arg("equation", "f1 * f2")
-        fx.add_arg("to", bg_img_filtered)
-        fx.send()
-
-        client.rm(ratio_img_lowpass)
-        client.rm(self.bg)
-
-        self.bg = bg_img_filtered
-
-    def _combine(self):
-        cubeit = client.command("cubeit")
-        cubeit.add_arg("fromlist", [self.red, self.bg, self.synth_blue])
-        cubeit.add_arg("to", self.combined)
-        cubeit.send()
-
-    def _reproject(self):
-        map_file = "{}.map".format(uuid4())
-        maptemplate = client.command("maptemplate")
-        maptemplate.add_arg("projection", "equirectangular")
-        maptemplate.add_arg("clat", 0.0)
-        maptemplate.add_arg("clon", 0.0)
-        maptemplate.add_arg("map", map_file)
-        maptemplate.send()
-
-        if self._red_orig_binning == 1:
-            resolution = 0.25
-        elif self._red_orig_binning == 2:
-            resolution = 0.5
-        else:
-            resolution = 1.0
-
-        mapped_file = "{}.combined.cub".format(
-            HiRISEColorSetProcessor.strip_ext(self.combined)
-        )
-
-        cam2map = client.command("cam2map")
-        cam2map.add_arg("from", self.combined)
-        cam2map.add_arg("map", map_file)
-        cam2map.add_arg("pixres", "mpp")
-        cam2map.add_arg("resolution", resolution)
-        cam2map.add_arg("to", mapped_file)
-        cam2map.send()
-
-        client.rm(self.combined)
-        client.rm(map_file)
-        self.combined = mapped_file
-
-    def cleanup(self):
-        for file in [self.red, self.bg, self.synth_blue, self.combined]:
-            client.rm(file)
+        self.channel0 = None
+        self.channel1 = None
+        self.stitched = out_file
 
     @staticmethod
-    def strip_ext(file_name):
-        return basename(file_name).split(".")[0]
-
-    @staticmethod
-    def _convert_to_cube(hirise_img):
-        hirise_basename = HiRISEColorSetProcessor.strip_ext(hirise_img)
+    def _convert_to_cube(client: ISISClient, hirise_img: str):
+        hirise_basename = strip_ext(basename(hirise_img))
 
         cub_file = "{}.cub".format(hirise_basename)
+
         hi2isis = client.command("hi2isis")
         hi2isis.add_file_arg("from", hirise_img)
         hi2isis.add_arg("to", cub_file)
         hi2isis.send()
-
-        client.rm(basename(hirise_img))
 
         spiceinit = client.command("spiceinit")
         spiceinit.add_arg("from", cub_file)
@@ -292,36 +130,229 @@ class HiRISEColorSetProcessor:
         return cal_file
 
     @staticmethod
-    def _reproject_single(cube_file, map_file, orig_binning):
-        cube_file_mapped = "{}.mapped.cub".format(
-            HiRISEColorSetProcessor.strip_ext(cube_file)
+    def get_img_url(pdsimage_path, pdsimage_id, detector, channel):
+        return HiRISEDetectorProcessor._PDS_IMAGE_PREFIX.format(
+            pdsimage_path,
+            pdsimage_id,
+            detector,
+            channel
         )
 
-        if orig_binning == 1:
-            resolution = 0.25
-        elif orig_binning == 2:
-            resolution = 0.5
-        elif orig_binning == 4:
-            resolution = 1.0
+
+class HiRISETrueColorProcessor:
+    def __init__(self, isis_client: ISISClient, image_id: str, red_cube: str, blue_green_cube: str):
+        self._isis_client = isis_client
+        self._img_id = image_id
+        self.red = red_cube
+        self.bg = blue_green_cube
+        self.synth_blue = None
+        self.combined = None
+        self._red_orig_binning = 0
+        self._bg_orig_binning = 0
+
+    def process(self):
+        self._size_match_bg()
+        self._fix_jitter()
+        self._propagate_red_highfreq()
+        self._generate_synth_blue()
+        self._combine()
+        self._reproject()
+
+    def _size_match_bg(self):
+        with TemporaryDirectory() as tmp_dir:
+            red_dl = path_join(tmp_dir, self.red)
+            bg_dl = path_join(tmp_dir, self.bg)
+
+            with ThreadPoolExecutor() as pool:
+                for file, dl_file in [(self.red, red_dl), (self.bg, bg_dl)]:
+                    pool.submit(
+                        self._isis_client.download,
+                        file,
+                        dl_file
+                    )
+
+            red_lbl = ISISClient.parse_cube_label(red_dl)
+            bg_lbl = ISISClient.parse_cube_label(bg_dl)
+
+            self._red_orig_binning = red_lbl["IsisCube"]["Instrument"]["Summing"]
+            self._bg_orig_binning = bg_lbl["IsisCube"]["Instrument"]["Summing"]
+
+            red_samples = red_lbl["IsisCube"]["Core"]["Dimensions"]["Samples"]
+            red_lines = red_lbl["IsisCube"]["Core"]["Dimensions"]["Lines"]
+
+            optical_distortion_correct = 1.0006
+
+            scale_factor = (
+                float(self._bg_orig_binning) /
+                float(self._red_orig_binning) *
+                optical_distortion_correct
+            )
+
+            enlarged_file = "{}.enlarged.cub".format(strip_ext(self.bg))
+
+            enlarge = self._isis_client.command("enlarge")
+            enlarge.add_arg("from", self.bg)
+            enlarge.add_arg("interp", "bilinear")
+            enlarge.add_arg("sscale", scale_factor)
+            enlarge.add_arg("lscale", scale_factor)
+            enlarge.add_arg("to", enlarged_file)
+            enlarge.send()
+
+            cropped_file = "{}.cropped.cub".format(strip_ext(self.bg))
+
+            crop = self._isis_client.command("crop")
+            crop.add_arg("from", enlarged_file)
+            crop.add_arg("nsamples", red_samples)
+            crop.add_arg("nlines", red_lines)
+            crop.add_arg("to", cropped_file)
+            crop.send()
+
+            self._isis_client.rm(enlarged_file)
+
+            editlab = self._isis_client.command("editlab")
+            editlab.add_arg("from", cropped_file)
+            editlab.add_arg("grpname", "Instrument")
+            editlab.add_arg("keyword", "Summing")
+            editlab.add_arg("value", self._red_orig_binning)
+            editlab.send()
+
+            self._isis_client.rm(self.bg)
+            self.bg = cropped_file
+
+    def _fix_jitter(self):
+        bg_basename = strip_ext(self.bg)
+        cnet_file = "{}.cnet".format(bg_basename)
+        slithered_file = "{}.slither.cub".format(bg_basename)
+
+        hijitreg = self._isis_client.command("hijitreg")
+        hijitreg.add_arg("from", self.red)
+        hijitreg.add_arg("match", self.bg)
+        hijitreg.add_arg("cnetfile", cnet_file)
+        hijitreg.send()
+
+        slither = self._isis_client.command("slither")
+        slither.add_arg("from", self.bg)
+        slither.add_arg("control", cnet_file)
+        slither.add_arg("direction", "reverse")
+        slither.add_arg("to", slithered_file)
+        slither.send()
+
+        self._isis_client.rm(cnet_file)
+        self._isis_client.rm(self.bg)
+
+        self.bg = slithered_file
+
+    def _propagate_red_highfreq(self):
+        bg_basename = strip_ext(self.bg)
+
+        ratio_img = "{}.ratio.cub".format(bg_basename)
+        ratio_img_lowpass = "{}.lowpass.cub".format(bg_basename)
+        bg_img_filtered = "{}.filtered.cub".format(bg_basename)
+
+        ratio = self._isis_client.command("ratio")
+        ratio.add_arg("numerator", self.bg)
+        ratio.add_arg("denominator", self.red)
+        ratio.add_arg("to", ratio_img)
+        ratio.send()
+
+        if self._bg_orig_binning == 2:
+            boxcar_size = 3
+        elif self._bg_orig_binning == 4:
+            boxcar_size = 5
         else:
-            err = "Invalid binning for {} (expected 1, 2, or 4, got {})".format(
-                cube_file,
-                orig_binning
+            err = "Invalid binning for {} (got {}, expected 2 or 4)".format(
+                self.bg,
+                self._bg_orig_binning
             )
             raise RuntimeError(err)
 
-        cam2map = client.command("cam2map")
-        cam2map.add_arg("from", cube_file)
+        lowpass = self._isis_client.command("lowpass")
+        lowpass.add_arg("from", ratio_img)
+        lowpass.add_arg("samples", boxcar_size)
+        lowpass.add_arg("lines", boxcar_size)
+        lowpass.add_arg("to", ratio_img_lowpass)
+        lowpass.send()
+
+        self._isis_client.rm(ratio_img)
+
+        fx = self._isis_client.command("fx")
+        fx.add_arg("f1", ratio_img_lowpass)
+        fx.add_arg("f2", self.red)
+        fx.add_arg("equation", "f1 * f2")
+        fx.add_arg("to", bg_img_filtered)
+        fx.send()
+
+        self._isis_client.rm(ratio_img_lowpass)
+        self._isis_client.rm(self.bg)
+
+        self.bg = bg_img_filtered
+
+    def _generate_synth_blue(self):
+        self.synth_blue = "{}_{}.cub".format(
+            re_sub(r"RED\d", "BLUE", strip_ext(self.red)),
+            urandom(4).hex()
+        )
+
+        fx = self._isis_client.command("fx")
+        fx.add_arg("f1", self.bg)
+        fx.add_arg("f2", self.red)
+        fx.add_arg("equation", "[2 * f1] - [0.3 * f2]")
+        fx.add_arg("to", self.synth_blue)
+        fx.send()
+
+    def _combine(self):
+        self.combined = "{}.cub".format(image_id)
+        cubeit = self._isis_client.command("cubeit")
+        cubeit.add_arg("fromlist", [self.red, self.bg, self.synth_blue])
+        cubeit.add_arg("to", self.combined)
+        cubeit.send()
+
+    def _reproject(self):
+        map_file = "{}.map".format(uuid4())
+        maptemplate = self._isis_client.command("maptemplate")
+        maptemplate.add_arg("projection", "equirectangular")
+        maptemplate.add_arg("clat", 0.0)
+        maptemplate.add_arg("clon", 0.0)
+        maptemplate.add_arg("map", map_file)
+        maptemplate.send()
+
+        if self._red_orig_binning == 1:
+            resolution = 0.25
+        elif self._red_orig_binning == 2:
+            resolution = 0.5
+        else:
+            resolution = 1.0
+
+        mapped_file = "{}.combined.cub".format(strip_ext(self.combined))
+
+        cam2map = self._isis_client.command("cam2map")
+        cam2map.add_arg("from", self.combined)
         cam2map.add_arg("map", map_file)
-        cam2map.add_arg("to", cube_file_mapped)
         cam2map.add_arg("pixres", "mpp")
         cam2map.add_arg("resolution", resolution)
+        cam2map.add_arg("to", mapped_file)
         cam2map.send()
 
-        client.rm(cube_file)
+        self._isis_client.rm(self.combined)
+        self.combined = mapped_file
 
-        return cube_file_mapped
+        self._isis_client.rm(map_file)
+        self._isis_client.rm(self.red)
+        self._isis_client.rm(self.bg)
+        self._isis_client.rm(self.synth_blue)
 
+        self.red = None
+        self.bg = None
+        self.synth_blue = None
+
+
+class HiRISECCDProcessor:
+    pass
+
+
+data_dir = "/data/disk/hirise_jezero"
+output_dir = path_join(data_dir, "output")
+client = ISISClient("http://127.0.0.1:8080/api/v1")
 
 for directory in [data_dir, output_dir]:
     if not path_exists(directory):
@@ -329,54 +360,31 @@ for directory in [data_dir, output_dir]:
 
 image_path = "EDR/PSP/ORB_008800_008899/PSP_008831_1455"
 image_id = "PSP_008831_1455"
+detectors = ["RED4", "BG12"]
+detector_processors = list()
 
-red4_bg12_0 = HiRISEColorSetProcessor(
-    "{}_RED4_BG12.cub".format(image_id),
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/{}/{}_RED4_0.IMG".format(image_path, image_id),
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/{}/{}_BG12_0.IMG".format(image_path, image_id),
-)
-
-red5_bg13_0 = HiRISEColorSetProcessor(
-    "{}_RED5_BG13.cub".format(image_id),
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/{}/{}_RED5_0.IMG".format(image_path, image_id),
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/HiRISE/{}/{}_BG13_0.IMG".format(image_path, image_id),
-)
-
-# ThreadPool inception
 with ThreadPoolExecutor() as pool:
-    for color_set in [red4_bg12_0, red5_bg13_0]:
-        pool.submit(color_set.process)
+    for detector in detectors:
+        detector_proc = HiRISEDetectorProcessor(
+            client,
+            data_dir,
+            image_path,
+            image_id,
+            detector
+        )
+        pool.submit(detector_proc.process)
+        detector_processors.append(detector_proc)
 
-red_bg_cube = "{}.cub".format(image_id)
-automos = client.command("automos")
-automos.add_arg("fromlist", [red4_bg12_0.combined, red5_bg13_0.combined])
-automos.add_arg("mosaic", red_bg_cube)
-automos.send()
+for detector in detector_processors:
+    client.download(detector.stitched, path_join(output_dir, detector.stitched))
 
-red4_bg12_0.cleanup()
-red5_bg13_0.cleanup()
+color_proc = HiRISETrueColorProcessor(
+    client,
+    image_id,
+    detector_processors[0].stitched,
+    detector_processors[1].stitched
+)
+color_proc.process()
 
-blue_cub = "{}.blue.cub".format(image_id)
-fx = client.command("fx")
-fx.add_arg("f1", "{}+1".format(red_bg_cube))
-fx.add_arg("f2", "{}+2".format(red_bg_cube))
-fx.add_arg("equation", "[(f2 * 2) - (f1 * 0.3)]")
-fx.add_arg("to", blue_cub)
-fx.send()
-
-out_tif = "{}.tif".format(image_id)
-isis2std = client.command("isis2std")
-isis2std.add_arg("mode", "rgb")
-isis2std.add_arg("format", "tiff")
-isis2std.add_arg("red", "{}+1".format(red_bg_cube))
-isis2std.add_arg("green", "{}+2".format(red_bg_cube))
-isis2std.add_arg("blue", blue_cub)
-isis2std.add_arg("to", out_tif)
-isis2std.send()
-
-client.rm(red_bg_cube)
-client.rm(blue_cub)
-
-client.download(out_tif, path_join(output_dir, out_tif))
-
-client.rm(out_tif)
+client.download(color_proc.combined, path_join(output_dir, color_proc.combined))
+client.rm(color_proc.combined)
