@@ -17,6 +17,9 @@ conda activate isis
 ./wsgi.py
 ```
 
+## API
+![api screenshot](./docs/api.png)
+
 ## Example Requests
 Uploading the MRO image J03_045994_1986_XN_18N282W.IMG, transforming it to an
 ISIS cube, and downloading the result
@@ -43,6 +46,7 @@ curl -o mro.cub http://127.0.0.1:8080/files/mro.cub
 ```
 
 ### isis_cloud.client.ISISClient
+
 ```python
 from isis_cloud.client import ISISClient
 
@@ -58,7 +62,7 @@ ISISClient.fetch(
 # Create an API client and mroctx2isis command
 client = ISISClient("http://127.0.0.1:8080")
 
-mroctx2isis = client.command("mroctx2isis")
+mroctx2isis = client.program("mroctx2isis")
 
 # Automatically upload the input file when we send the request
 mroctx2isis.add_file_arg("from", pdsimage_file)

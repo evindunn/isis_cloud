@@ -17,19 +17,27 @@ paths:
     post:
       operationId: isis_cloud.server.routes.isis.run_isis
       tags:
-        - ISIS Commands
-      summary: Run an ISIS command on the server
+        - ISIS Programs
+      summary: Run an ISIS program on the server
       requestBody:
-        description: The ISIS command to run
+        description: The ISIS program to run
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ISISCommand'
+              $ref: '#/components/schemas/ISISProgram'
       responses:
         "200":
           description: The command executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponseMessage'
         "500":
           description: The command threw an error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponseMessage'
   /files:
     post:
       operationId: isis_cloud.server.routes.files.upload_file
@@ -77,7 +85,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorMessage'
+                $ref: '#/components/schemas/ResponseMessage'
     delete:
       operationId: isis_cloud.server.routes.files.delete_file
       tags:
@@ -100,16 +108,46 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorMessage'
+                $ref: '#/components/schemas/ResponseMessage'
+  /files/{file_name}/label:
+    get:
+      operationId: isis_cloud.server.routes.files.retrieve_file_label
+      tags:
+        - File Management
+      summary: Retrieve the label of an ISIS cube as JSON
+      description: See https://isis.astrogeology.usgs.gov/documents/LabelDictionary/LabelDictionary.html
+      parameters:
+        - name: file_name
+          in: path
+          description: The file
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: string
+            pattern: "^[^$]+\\.cub$"
+      responses:
+        "200":
+          description: The label for the given cube
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ISISCubeLabel'
+        "404":
+          description: The specified file does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponseMessage'
 components:
   schemas:
-    ISISCommand:
+    ISISProgram:
+      type: object
       required:
         - args
-        - command
-      type: object
+        - program
       properties:
-        command:
+        program:
           type: string
           description: The ISIS command line program name
           example: mroctx2isis
@@ -117,11 +155,67 @@ components:
           type: object
           additionalProperties: true
           example: '{"from": "my-mro.img", "to": "my-mro.cub"}'
-    ErrorMessage:
-      required: [message]
+
+    ISISCubeLabel:
       type: object
+      required: [Core]
+      additionalProperties: true
+      properties:
+        Core:
+          type: object
+          required:
+            - StartByte
+            - Format
+            - Dimensions
+            - Pixel
+          properties:
+            Core:
+              type: string
+            StartByte:
+              type: integer
+            Format:
+              type: string
+            TileSamples:
+              type: integer
+            TileLines:
+              type: integer
+            Dimensions:
+              type: object
+              required:
+                - Samples
+                - Lines
+                - Bands
+              properties:
+                Samples:
+                  type: integer
+                Lines:
+                  type: integer
+                Bands:
+                  type: integer
+            Pixels:
+              type: object
+              required:
+                - Type
+                - ByteOrder
+                - Base
+                - Multiplier
+              properties:
+                Type:
+                  type: string
+                ByteOrder:
+                  type: string
+                Base:
+                  type: number
+                  format: float
+                Multiplier:
+                  type: number
+                  format: float
+
+    ResponseMessage:
+      type: object
+      required: [message]
       properties:
         message:
           type: string
-          description: The error message
-          example: File not found
+          description: A message returned by the resource
+          example: Command completed successfully

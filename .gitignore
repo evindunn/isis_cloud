@@ -4,3 +4,4 @@
 *.IMG
 *.png
 *.tif
+!docs/*.png

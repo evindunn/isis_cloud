@@ -1,7 +1,6 @@
 import json
 from os.path import basename
 from time import time
-from pvl import load as pvl_load
 
 import requests
 from urllib.parse import quote_plus as url_quote
@@ -36,22 +35,29 @@ class ISISClient:
         file_path = url_quote(file_path)
         return "/".join([self._server_addr, "files", file_path])
 
-    def command(self, command: str):
+    def _label_url(self, file_path):
+        return "/".join([self._file_url(file_path), "label"])
+
+    def program(self, command: str):
         return ISISRequest(self._server_addr, command)
 
     def download(self, remote_path, local_path):
         return ISISClient.fetch(self._file_url(remote_path), local_path)
 
-    def rm(self, remote_path):
+    def delete(self, remote_path):
         remote_url = self._file_url(remote_path)
         ISISClient.logger.debug("Deleting {}...".format(remote_url))
         r = requests.delete(remote_url)
         _catch_err(r)
         ISISClient.logger.debug("{} deleted successfully".format(remote_url))
 
-    @staticmethod
-    def parse_cube_label(cube_file):
-        return pvl_load(cube_file)
+    def label(self, remote_path):
+        remote_url = self._label_url(remote_path)
+        ISISClient.logger.debug("Retrieving label for {}...".format(remote_url))
+        r = requests.get(remote_url)
+        _catch_err(r)
+        ISISClient.logger.debug("Label for {} retrieved successfully".format(remote_url))
+        return r.json()
 
     @staticmethod
     def fetch(remote_url, download_path):
@@ -76,12 +82,12 @@ class ISISClient:
 
 
 class ISISRequest:
-    def __init__(self, server_url: str, command: str):
+    def __init__(self, server_url: str, program: str):
         self._server_url = server_url
-        self._command = command
+        self._program = program
         self._args = dict()
         self._files = dict()
-        self._logger = getLogger(command)
+        self._logger = getLogger(program)
 
     def add_arg(self, arg_name, arg_value):
         self._args[arg_name] = arg_value
@@ -111,7 +117,7 @@ class ISISRequest:
             _catch_err(r)
 
         cmd_req = {
-            "command": self._command,
+            "program": self._program,
             "args": command_args
         }
 

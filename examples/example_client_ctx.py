@@ -32,7 +32,7 @@ try:
         input_file
     )
 
-    mroctx2isis = client.command("mroctx2isis")
+    mroctx2isis = client.program("mroctx2isis")
     mroctx2isis.add_file_arg(
         "from",
         input_file
@@ -40,35 +40,35 @@ try:
     mroctx2isis.add_arg("to", "mro.cub")
     mroctx2isis.send()
 
-    spiceinit = client.command("spiceinit")
+    spiceinit = client.program("spiceinit")
     spiceinit.add_arg("from", "mro.cub")
     spiceinit.add_arg("web", "true")
     spiceinit.send()
 
-    ctxcal = client.command("ctxcal")
+    ctxcal = client.program("ctxcal")
     ctxcal.add_arg("from", "mro.cub")
     ctxcal.add_arg("to", "ctxcal.cub")
     ctxcal.send()
 
-    ctxevenodd = client.command("ctxevenodd")
+    ctxevenodd = client.program("ctxevenodd")
     ctxevenodd.add_arg("from", "ctxcal.cub")
     ctxevenodd.add_arg("to", "ctxevenodd.cub")
     ctxevenodd.send()
 
-    maptemplate = client.command("maptemplate")
+    maptemplate = client.program("maptemplate")
     maptemplate.add_arg("projection", "Equirectangular")
     maptemplate.add_arg("map", "equirectangular.map")
     maptemplate.add_arg("clon", "0.0")
     maptemplate.add_arg("clat", "0.0")
     maptemplate.send()
 
-    cam2map = client.command("cam2map")
+    cam2map = client.program("cam2map")
     cam2map.add_arg("from", "ctxevenodd.cub")
     cam2map.add_arg("map", "equirectangular.map")
     cam2map.add_arg("to", "cam2map.cub")
     cam2map.send()
 
-    isis2std = client.command("isis2std")
+    isis2std = client.program("isis2std")
     isis2std.add_arg("from", "cam2map.cub")
     isis2std.add_arg("to", output_file)
     isis2std.add_arg("format", "tiff")

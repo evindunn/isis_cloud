@@ -40,7 +40,7 @@ def run_isis():
         command = path_join(
             getenv("ISISROOT"),
             "bin",
-            req["command"].strip("/")
+            req["program"].strip("/")
         )
 
         if not path_exists(command):
