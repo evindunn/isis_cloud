@@ -28,8 +28,10 @@ def retrieve_file_label(file_name):
     if not path_exists(file_path):
         return {"message": "File not found"}, 404
 
-    return pvl_load(file_path)
-
+    try:
+        return pvl_load(file_path)
+    except:
+        return {"message": "Invalid cube label for '{}'".format(file_name)}, 500
 
 def delete_file(file_name):
     file_path = path_join(ISISServerConfig.work_dir(), file_name.strip("/"))

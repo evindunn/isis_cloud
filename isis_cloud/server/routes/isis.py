@@ -1,14 +1,16 @@
+import logging
 from os import chdir, getcwd, getenv
-from os.path import exists as path_exists, join as path_join
+from os.path import exists as path_exists, join as path_join, basename
 from os import remove
 from subprocess import run as sp_run, PIPE, DEVNULL
-from errno import ENOENT as FILE_NOT_FOUND
 from uuid import uuid4
+from logging import getLogger
 
 from flask import request, jsonify
 
 from .._config import ISISServerConfig
 
+logger = getLogger("ISIS")
 
 def _serialize_command_args(arg_dict):
     args = list()
@@ -54,7 +56,14 @@ def run_isis():
 
         if not proc.returncode == 0:
             status = 500
-            response["message"] = proc.stderr.decode("utf-8")
+            stderr = proc.stderr.decode("utf-8")
+            response["message"] = stderr
+
+            err_msg = "{} failed\n{}".format(
+                ' '.join([basename(command), *command_args]),
+                stderr
+            )
+            logging.error(err_msg)
 
         # Auto-cleanup listfiles
         for file in listfiles:

@@ -139,6 +139,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ResponseMessage'
+        "500":
+          description: The specified file does not have a properly-formatted cube label
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponseMessage'
 components:
   schemas:
     ISISProgram:
