@@ -121,7 +121,7 @@ class HiRISEDetectorChannelProcessor:
 
         spiceinit = client.program("spiceinit")
         spiceinit.add_arg("from", cub_file)
-        spiceinit.add_arg("web", "true")
+        # spiceinit.add_arg("web", "true")
         spiceinit.send()
 
         cal_file = "{}.cub".format(uuid4())

@@ -12,8 +12,7 @@ from HiRISEDetectorChannelProcessor import HiRISEDetectorChannelProcessor
 
 class HiRISEMultiDetectorProcessor:
     _OPTICAL_DISTORTION_CORRECT = 1.0006
-    _PROJECTION_TYPE = "mercator"
-    _NOSEAM_FILTER_SIZE = 5
+    _PROJECTION_TYPE = "EQUIRECTANGULAR"
 
     # Match the first 1/64 x 1/128 of the bg image to some area within the
     # first 1/32 x 1/64 of the red image with at least 90% correlation.
@@ -296,18 +295,41 @@ class HiRISEMultiDetectorProcessor:
         fx.add_arg("to", blue_band)
         fx.send()
 
+        blue_band_normalized = "{}.cub".format(uuid4())
+
+        # TODO: Do I need to do this? Trying to make the output less blue
+        cubenorm = self._isis_client.program("cubenorm")
+        cubenorm.add_arg("from", blue_band)
+        cubenorm.add_arg("to", blue_band_normalized)
+        cubenorm.send()
+
+        self._isis_client.delete(blue_band)
+
         output_file = HiRISEMultiDetectorProcessor._combine(
             self._isis_client,
-            [red_band, green_band, blue_band]
+            [red_band, green_band, blue_band_normalized]
         )
 
         self._isis_client.delete(self.mosaic)
-        self._isis_client.delete(blue_band)
+        self._isis_client.delete(blue_band_normalized)
 
         self.mosaic = output_file
 
     @staticmethod
     def mosaic(isis_client, cubes):
+        cube_zero_size, _ = HiRISEMultiDetectorProcessor._fetch_cube_meta(
+            isis_client,
+            cubes[0]
+        )
+        filter_size = [
+            cube_zero_size[0] // 16,
+            cube_zero_size[1] // 32,
+        ]
+
+        # Make sure they're odd
+        filter_size[0] = filter_size[0] + 1 if filter_size[0] % 2 == 0 else filter_size[0]
+        filter_size[1] = filter_size[1] + 1 if filter_size[1] % 2 == 0 else filter_size[1]
+
         equalized_cubs = ["{}.cub".format(uuid4()) for _ in range(len(cubes))]
 
         equalizer = isis_client.program("equalizer")
@@ -319,8 +341,8 @@ class HiRISEMultiDetectorProcessor:
         mosaic_file = "{}.cub".format(uuid4())
         noseam = isis_client.program("noseam")
         noseam.add_arg("fromlist", equalized_cubs)
-        noseam.add_arg("samples", HiRISEMultiDetectorProcessor._NOSEAM_FILTER_SIZE)
-        noseam.add_arg("lines", HiRISEMultiDetectorProcessor._NOSEAM_FILTER_SIZE)
+        noseam.add_arg("samples", filter_size[0])
+        noseam.add_arg("lines", filter_size[1])
         noseam.add_arg("to", mosaic_file)
         noseam.send()
 
@@ -514,4 +536,3 @@ class HiRISEMultiDetectorProcessor:
         cubeit.add_arg("to", combined)
         cubeit.send()
         return combined
-

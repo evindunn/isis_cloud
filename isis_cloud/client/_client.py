@@ -1,4 +1,7 @@
 import json
+from contextlib import closing
+from urllib.error import URLError, HTTPError
+from urllib.request import urlretrieve
 from os.path import basename
 from time import time
 
@@ -64,14 +67,15 @@ class ISISClient:
         ISISClient.logger.debug("Downloading {}...".format(remote_url))
         start_time = time()
 
-        download_file = open(download_path, 'wb')
-        response = requests.get(remote_url, stream=True)
-
-        _catch_err(response)
-
-        with response, download_file:
-            for chunk in response.iter_content(chunk_size=ISISClient._DL_CHUNK_SIZE):
-                download_file.write(chunk)
+        # urlretrieve can do both http & ftp
+        try:
+            urlretrieve(remote_url, download_path)
+        except HTTPError as e:
+            err_msg = "Server returned {}: {}".format(e.code, e.reason)
+            raise RuntimeError(err_msg)
+        except URLError as e:
+            err_msg = "Server returned '{}'".format(e.reason)
+            raise RuntimeError(err_msg)
 
         log_msg = "{} downloaded to {} (took {:.1f}s)".format(
             remote_url,

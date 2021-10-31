@@ -5,3 +5,4 @@
 *.png
 *.tif
 !docs/*.png
+**/print.prt
