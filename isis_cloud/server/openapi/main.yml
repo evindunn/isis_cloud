@@ -159,8 +159,15 @@ components:
           example: mroctx2isis
         args:
           type: object
+          description: Key-value pairs representing command-line args to the program
           additionalProperties: true
-          example: '{"from": "my-mro.img", "to": "my-mro.cub"}'
+          example: '{"from": "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_0047/data/P03_002387_1987_XI_18N282W.IMG", "to": "my-mro.cub"}'
+        remotes:
+          type: array
+          description: A list of keys to 'args' which must be downloaded before running the command
+          example: '["from"]'
+          items:
+            type: string
 
     ISISCubeLabel:
       type: object
@@ -224,4 +231,4 @@ components:
         message:
           type: string
           description: A message returned by the resource
-          example: Command completed successfully
+          example: Status of the command

@@ -33,6 +33,7 @@ def retrieve_file_label(file_name):
     except:
         return {"message": "Invalid cube label for '{}'".format(file_name)}, 500
 
+
 def delete_file(file_name):
     file_path = path_join(ISISServerConfig.work_dir(), file_name.strip("/"))
     if not path_exists(file_path):

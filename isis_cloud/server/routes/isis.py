@@ -3,14 +3,17 @@ from os import chdir, getcwd, getenv
 from os.path import exists as path_exists, join as path_join, basename
 from os import remove
 from subprocess import run as sp_run, PIPE, DEVNULL
+from urllib.request import urlretrieve
 from uuid import uuid4
 from logging import getLogger
+from tempfile import NamedTemporaryFile
 
 from flask import request, jsonify
 
 from .._config import ISISServerConfig
 
 logger = getLogger("ISIS")
+
 
 def _serialize_command_args(arg_dict):
     args = list()
@@ -32,23 +35,41 @@ def _serialize_command_args(arg_dict):
 
 
 def run_isis():
+    temp_files = list()
+    listfiles = list()
+
     orig_dir = getcwd()
     chdir(ISISServerConfig.work_dir())
 
     try:
-        req = request.get_json()
+        body = request.get_json()
 
         # Only allow executables in the conda bin
         command = path_join(
             getenv("ISISROOT"),
             "bin",
-            req["program"].strip("/")
+            body["program"].strip("/")
         )
 
         if not path_exists(command):
             return jsonify({"message": "Command not found"}), 404
 
-        command_args, listfiles = _serialize_command_args(req["args"])
+        remote_files = body.pop("remotes", [])
+
+        # Download any arguments that are tagged as remote files
+        for arg_key in remote_files:
+            if arg_key not in body["args"].keys():
+                return jsonify({
+                    "message": "remote '{}' not found in args".format(arg_key)
+                }), 400
+
+            url = body["args"][arg_key]
+            dl_file = NamedTemporaryFile('r+', dir=getcwd())
+            urlretrieve(url, dl_file.name)
+            temp_files.append(dl_file)
+            body["args"][arg_key] = dl_file.name
+
+        command_args, listfiles = _serialize_command_args(body["args"])
 
         status = 200
         response = {"message": "Command executed successfully"}
@@ -65,11 +86,14 @@ def run_isis():
             )
             logging.error(err_msg)
 
-        # Auto-cleanup listfiles
-        for file in listfiles:
-            remove(file)
-
         return jsonify(response), status
 
     finally:
+        # Auto-cleanup listfiles
+        [remove(f) for f in listfiles if path_exists(f)]
+
+        # Clean up temp files
+        [f.close() for f in temp_files]
+
+        # Change back to original working directory
         chdir(orig_dir)
