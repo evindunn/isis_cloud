@@ -25,10 +25,10 @@ getLogger("urllib3.connectionpool").setLevel(ERROR)
 
 client = ISISClient("http://127.0.0.1:8080/api/v1")
 input_urls = [
-    "http://pdsimage.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_0047/data/P03_002387_1987_XI_18N282W.IMG",
-    "http://pdsimage.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_0589/data/P19_008650_1987_XI_18N282W.IMG",
-    "http://pdsimage.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_0747/data/B05_011630_1986_XN_18N281W.IMG",
-    "http://pdsimage.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_1361/data/G13_023102_1986_XN_18N282W.IMG"
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_0047/data/P03_002387_1987_XI_18N282W.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_0589/data/P19_008650_1987_XI_18N282W.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_1895/data/D16_033651_1987_XN_18N281W.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_2013/data/D22_035629_1987_XN_18N282W.IMG",
 ]
 output_file = "jezero.tif"
 
