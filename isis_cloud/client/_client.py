@@ -91,10 +91,15 @@ class ISISRequest:
         self._program = program
         self._args = dict()
         self._files = dict()
+        self._remotes = list()
         self._logger = getLogger(program)
 
-    def add_arg(self, arg_name, arg_value):
+    def add_arg(self, arg_name, arg_value, is_remote=False):
         self._args[arg_name] = arg_value
+
+        if is_remote:
+            self._remotes.append(arg_name)
+
         return self
 
     def add_file_arg(self, arg_name, file_path):
@@ -122,7 +127,8 @@ class ISISRequest:
 
         cmd_req = {
             "program": self._program,
-            "args": command_args
+            "args": command_args,
+            "remotes": self._remotes
         }
 
         r = requests.post(
