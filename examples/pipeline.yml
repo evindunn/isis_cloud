@@ -1,0 +1,21 @@
+input_files:
+  - "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_0047/data/P03_002387_1987_XI_18N282W.IMG"
+  - "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_0589/data/P19_008650_1987_XI_18N282W.IMG"
+  - "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_2013/data/D22_035629_1987_XN_18N282W.IMG"
+  - "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_1895/data/D16_033651_1987_XN_18N281W.IMG"
+pipeline:
+- cmd: mroctx2isis
+  args:
+    from: $1
+    to: "$uuid().cub"
+  outputs:
+    - "to"
+
+- cmd: spiceinit
+  args:
+    web: true
+    from: "$1"
+  outputs:
+    - "from"
+
+- download: "$1"

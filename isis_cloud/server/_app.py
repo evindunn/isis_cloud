@@ -1,7 +1,6 @@
 from logging import getLogger
 
 import connexion
-from threading import Thread
 from time import sleep, time
 from os import listdir, stat as file_stat, remove, removedirs
 from os.path import join as path_join, basename, isdir
@@ -20,8 +19,6 @@ class ISISServer(connexion.FlaskApp):
             options={"swagger_url": "/docs"}
         )
         self.add_api("main.yml")
-        cleanup_thread = Thread(target=ISISServer._file_cleanup, daemon=True)
-        cleanup_thread.start()
 
     @staticmethod
     def _file_cleanup():

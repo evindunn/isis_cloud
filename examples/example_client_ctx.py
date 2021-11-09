@@ -4,9 +4,6 @@ from sys import path as sys_path
 from os.path import dirname, basename, realpath
 from sys import stderr
 from logging import basicConfig as logConfig, getLogger, DEBUG, ERROR
-from urllib.parse import urlparse
-from os.path import join as path_join
-from tempfile import TemporaryDirectory
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
@@ -24,11 +21,13 @@ getLogger("urllib3.connectionpool").setLevel(ERROR)
 
 
 client = ISISClient("http://127.0.0.1:8080/api/v1")
+
+# Order matters for feature matching. They're from west to east
 input_urls = [
     "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_0047/data/P03_002387_1987_XI_18N282W.IMG",
     "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_0589/data/P19_008650_1987_XI_18N282W.IMG",
-    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_1895/data/D16_033651_1987_XN_18N281W.IMG",
     "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_2013/data/D22_035629_1987_XN_18N282W.IMG",
+    "https://pdsimage2.wr.usgs.gov/Missions/Mars_Reconnaissance_Orbiter/CTX/mrox_1895/data/D16_033651_1987_XN_18N281W.IMG",
 ]
 output_file = "jezero.tif"
 
@@ -37,7 +36,7 @@ def get_random_cub_filename():
     return "{}.cub".format(uuid4())
 
 
-def generate_lev2_file(cub_file):
+def generate_lev2_file(client, cub_file, map_file):
     spiceinit = client.program("spiceinit")
     spiceinit.add_arg("from", cub_file)
     spiceinit.add_arg("web", "true")
@@ -57,62 +56,37 @@ def generate_lev2_file(cub_file):
     ctxevenodd.add_arg("to", eo_file)
     ctxevenodd.send()
 
-    norm_file = get_random_cub_filename()
-
-    cubenorm = client.program("cubenorm")
-    cubenorm.add_arg("from", eo_file)
-    cubenorm.add_arg("to", norm_file)
-    cubenorm.send()
-
     lev2_file = get_random_cub_filename()
 
     cam2map = client.program("cam2map")
-    cam2map.add_arg("from", norm_file)
+    cam2map.add_arg("from", eo_file)
     cam2map.add_arg("map", map_file)
     cam2map.add_arg("pixres", "MPP")
     cam2map.add_arg("resolution", 5)     # Original on these files is >5, <6
     cam2map.add_arg("to", lev2_file)
     cam2map.send()
 
-    [client.delete(file) for file in [lev1_file, eo_file, norm_file]]
+    [client.delete(file) for file in [lev1_file, eo_file]]
 
     return lev2_file
 
 
 try:
-    with TemporaryDirectory() as temp_dir:
-        dl_files = list()
+    cub_files = list()
 
-        with ThreadPoolExecutor() as pool:
-            for input_url in input_urls:
-                input_url_parsed = urlparse(input_url)
-                dl_file = path_join(
-                    temp_dir,
-                    basename(input_url_parsed.path)
-                )
+    threads = list()
+    with ThreadPoolExecutor() as pool:
+        for input_url in input_urls:
+            cub_file = get_random_cub_filename()
+            mroctx2isis = client.program("mroctx2isis")
+            mroctx2isis.add_arg("from", input_url, is_remote=True)
+            mroctx2isis.add_arg("to", cub_file)
+            t = pool.submit(mroctx2isis.send)
+            threads.append(t)
+            cub_files.append(cub_file)
 
-                pool.submit(
-                    ISISClient.fetch,
-                    input_url,
-                    dl_file
-                )
-                dl_files.append(dl_file)
-
-        cub_files = list()
-
-        with ThreadPoolExecutor() as pool:
-            for input_file in dl_files:
-                cub_file = get_random_cub_filename()
-                mroctx2isis = client.program("mroctx2isis")
-                mroctx2isis.add_file_arg(
-                    "from",
-                    input_file
-                )
-                mroctx2isis.add_arg("to", cub_file)
-                pool.submit(mroctx2isis.send)
-                cub_files.append(cub_file)
-
-    [client.delete(basename(f)) for f in dl_files]
+    # Check for errors
+    [t.result() for t in threads]
 
     map_file = "{}.map".format(uuid4())
     maptemplate = client.program("maptemplate")
@@ -123,28 +97,45 @@ try:
     maptemplate.send()
 
     threads = list()
-
     with ThreadPoolExecutor() as pool:
         for cub_file in cub_files:
             thread = pool.submit(
                 generate_lev2_file,
-                cub_file
+                client,
+                cub_file,
+                map_file
             )
             threads.append(thread)
 
+    lev2_cubs = [t.result() for t in threads]
     [client.delete(f) for f in [map_file, *cub_files]]
 
-    lev2_cubs = [t.result() for t in threads]
+    norm_cubs = list()
 
-    equalized_cubs = [get_random_cub_filename() for _ in range(len(lev2_cubs))]
+    threads = list()
+    with ThreadPoolExecutor() as pool:
+        for file in lev2_cubs:
+            norm_file = get_random_cub_filename()
+            cubenorm = client.program("cubenorm")
+            cubenorm.add_arg("from", file)
+            cubenorm.add_arg("to", norm_file)
+            t = pool.submit(cubenorm.send)
+            threads.append(t)
+            norm_cubs.append(norm_file)
+
+    # Check for errors
+    [t.result() for t in threads]
+    [client.delete(f) for f in lev2_cubs]
+
+    equalized_cubs = [get_random_cub_filename() for _ in range(len(norm_cubs))]
 
     equalizer = client.program("equalizer")
-    equalizer.add_arg("fromlist", lev2_cubs)
+    equalizer.add_arg("fromlist", norm_cubs)
     equalizer.add_arg("tolist", equalized_cubs)
-    equalizer.add_arg("holdlist", [lev2_cubs[0]])
+    equalizer.add_arg("holdlist", [norm_cubs[0]])
     equalizer.send()
 
-    [client.delete(f) for f in lev2_cubs]
+    [client.delete(f) for f in norm_cubs]
 
     noseam_mos = get_random_cub_filename()
 
